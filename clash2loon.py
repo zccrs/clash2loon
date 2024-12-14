@@ -21,15 +21,16 @@ def convert_proxy(proxy_config):
         return proxy_config
         
     proxy_type = proxy_config.get('type', '').lower()
+    name = proxy_config.get('name', '')
     server = proxy_config.get('server', '')
     port = proxy_config.get('port', '')
     
-    logger.debug(f"Proxy type: {proxy_type}, server: {server}, port: {port}")
+    logger.debug(f"Proxy type: {proxy_type}, name: {name}, server: {server}, port: {port}")
     
     if proxy_type == 'ss':
         cipher = proxy_config.get('cipher', '')
         password = proxy_config.get('password', '')
-        result = f"shadowsocks,{server},{port},{cipher},\"{password}\""
+        result = f"{name} = shadowsocks,{server},{port},{cipher},\"{password}\""
         logger.debug(f"Converted SS proxy: {result}")
         
     elif proxy_type == 'ssr':
@@ -39,7 +40,7 @@ def convert_proxy(proxy_config):
         protocol_param = proxy_config.get('protocol-param', '')
         obfs = proxy_config.get('obfs', '')
         obfs_param = proxy_config.get('obfs-param', '')
-        result = f"shadowsocksr,{server},{port},{cipher},\"{password}\",{protocol},{protocol_param},{obfs},{obfs_param}"
+        result = f"{name} = shadowsocksr,{server},{port},{cipher},\"{password}\",{protocol},{protocol_param},{obfs},{obfs_param}"
         logger.debug(f"Converted SSR proxy: {result}")
         
     elif proxy_type == 'vmess':
@@ -59,14 +60,14 @@ def convert_proxy(proxy_config):
                 path = ""
         else:
             path = ""
-        result = f"vmess,{server},{port},{cipher},\"{uuid}\",{alterId}{tls}{path}"
+        result = f"{name} = vmess,{server},{port},{cipher},\"{uuid}\",{alterId}{tls}{path}"
         logger.debug(f"Converted VMess proxy: {result}")
         
     elif proxy_type == 'vless':
         uuid = proxy_config.get('uuid', '')
         transport = proxy_config.get('network', '')
         tls = ',tls=true' if proxy_config.get('tls', False) else ''
-        result = f"vless,{server},{port},\"{uuid}\",transport={transport}{tls}"
+        result = f"{name} = vless,{server},{port},\"{uuid}\",transport={transport}{tls}"
         if transport == 'ws':
             ws_opts = proxy_config.get('ws-opts', {})
             result += f",ws-path={ws_opts.get('path', '')}"
@@ -82,7 +83,7 @@ def convert_proxy(proxy_config):
         password = proxy_config.get('password', '')
         sni = proxy_config.get('sni', '')
         skip_cert_verify = ',skip-cert-verify=true' if proxy_config.get('skip-cert-verify', False) else ''
-        result = f"trojan,{server},{port},{password},tls=true,sni={sni}{skip_cert_verify}"
+        result = f"{name} = trojan,{server},{port},{password},tls=true,sni={sni}{skip_cert_verify}"
         logger.debug(f"Converted Trojan proxy: {result}")
 
     elif proxy_type == 'wireguard':
@@ -91,19 +92,22 @@ def convert_proxy(proxy_config):
         pre_shared_key = proxy_config.get('pre-shared-key', '')
         ip = proxy_config.get('ip', '')
         ipv6 = proxy_config.get('ipv6', '')
-        result = f"wireguard,{server},{port},{private_key},{peer_public_key},{pre_shared_key},{ip},{ipv6}"
+        result = f"{name} = wireguard,{server},{port},{private_key},{peer_public_key},{pre_shared_key},{ip},{ipv6}"
         logger.debug(f"Converted WireGuard proxy: {result}")
 
     elif proxy_type == 'hysteria2':
         password = proxy_config.get('password', '')
         sni = proxy_config.get('sni', '')
         skip_cert_verify = ',skip-cert-verify=true' if proxy_config.get('skip-cert-verify', False) else ''
-        result = f"hysteria2,{server},{port},{password},sni={sni}{skip_cert_verify}"
+        result = f"{name} = hysteria2,{server},{port},{password},sni={sni}{skip_cert_verify}"
         logger.debug(f"Converted Hysteria2 proxy: {result}")
             
     else:
         logger.warning(f"Unsupported proxy type: {proxy_type}")
         return None
+        
+    if 'dialer-proxy' in proxy_config:
+        result += f",underlying-proxy={proxy_config['dialer-proxy']}"
         
     return result
 
@@ -176,15 +180,19 @@ def convert_rules(rules):
     result = []
     
     for rule in rules:
+        if rule.startswith('RULE-SET'):
+            continue
         if isinstance(rule, str):
             parts = rule.split(',')
             if len(parts) >= 2:
-                result.append(rule)
-                logger.debug(f"Converted rule: {rule}")
+                if parts[0] == 'MATCH':
+                    parts[0] = 'FINAL'
+                result.append(','.join(parts))
+                logger.debug(f"Converted rule: {','.join(parts)}")
                 
     return result
 
-def convert_rule_providers(rule_providers):
+def convert_rule_providers(rule_providers, rules):
     """Convert rule providers from Clash to Loon format"""
     logger.debug(f"Converting rule providers: {rule_providers}")
     result = []
@@ -193,11 +201,21 @@ def convert_rule_providers(rule_providers):
         logger.debug("No rule providers to convert")
         return result
         
+    rule_provider_policies = {}
+    for rule in rules:
+        if rule.startswith('RULE-SET'):
+            parts = rule.split(',')
+            if len(parts) == 3:
+                rule_provider_policies[parts[1]] = parts[2]
+    
     for name, provider in rule_providers.items():
         url = provider.get('url', '')
         if url:
-            result.append(url)
-            logger.debug(f"Converted rule provider: {name}")
+            policy = rule_provider_policies.get(name)
+            if policy is None:
+                continue
+            result.append(f"{url},policy={policy},enabled=true")
+            logger.debug(f"Converted rule provider: {name} with policy: {policy}")
             
     return result
 
@@ -234,7 +252,7 @@ def convert_config_content(clash_config):
     if 'rule-providers' in clash_config:
         logger.debug("Converting rule providers section")
         loon_config.append('\n[Remote Rule]')
-        providers = convert_rule_providers(clash_config['rule-providers'])
+        providers = convert_rule_providers(clash_config['rule-providers'], clash_config.get('rules', []))
         loon_config.extend(providers)
         
     # Convert rules
